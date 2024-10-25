@@ -4,7 +4,7 @@ set -euo pipefail
 
 # Function to print an error message and exit the script.
 abort() {
-  printf "🚨 %s\n" "$@" >&2
+  printf "🚨 %s\n" "$*" >&2
   exit 1
 }
 
@@ -22,33 +22,46 @@ warn() {
 usage() {
   cat <<EOS
 💡 Workbrew Installer for macOS
-Usage: /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/workbrew/install/HEAD/install.sh)" --api-key YOUR_API_KEY
+Usage: ./workbrew.sh --api-key YOUR_API_KEY
     --api-key YOUR_API_KEY    🔑 Provide your unique Workbrew API key.
     -h, --help                🆘 Display this message.
 EOS
   exit "${1:-0}"
 }
 
-# Check if the correct number of arguments is provided and if the first argument is "--api-key".
-if [[ "$#" -ne 2 ]] || [[ "$1" != "--api-key" ]]; then
-  usage 1
-fi
+# Function to parse arguments.
+parse_args() {
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --api-key)
+        if [[ -n "${2:-}" ]]; then
+          API_KEY="$2"
+          shift 2
+        else
+          abort "Error: --api-key requires a value 🚨."
+        fi
+        ;;
+      -h|--help)
+        usage 0
+        ;;
+      *)
+        abort "Unknown option: $1 🚨."
+        ;;
+    esac
+  done
 
-# Assign the second argument to API_KEY.
-API_KEY="$2"
-# Check if the API_KEY is empty.
-if [[ -z "$API_KEY" ]]; then
-  abort "API key is required to proceed 🚧. Please provide your unique API key."
-fi
+  if [[ -z "${API_KEY:-}" ]]; then
+    usage 1
+  fi
+}
 
-# Check if the operating system is macOS.
-OS="$(uname)"
-if [[ "$OS" != "Darwin" ]]; then
-  abort "Workbrew is only supported on macOS 🖥️. Please use a macOS device to run this installer."
-fi
-
-# Print a welcome message.
-ohai "Welcome to Workbrew! 🍻 Setting up your device for optimal performance."
+# Function to check if the OS is macOS.
+check_os() {
+  OS=$(uname)
+  if [[ "$OS" != "Darwin" ]]; then
+    abort "Workbrew is only supported on macOS 🖥️. Please use a macOS device to run this installer."
+  fi
+}
 
 # Function to check and install Xcode Command Line Tools.
 check_xcode_clt() {
@@ -56,7 +69,7 @@ check_xcode_clt() {
   if ! xcode-select -p &>/dev/null; then
     echo "🛠️ Xcode Command Line Tools not found. Installing..."
     touch "/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress"
-    CLT_PACKAGE="$(softwareupdate -l | grep -B 1 "Command Line Tools" | awk -F"*" '/^ *\*/ {print $2}' | sed -e 's/^ *Label: //' -e 's/^ *//' | sort -V | tail -n1)"
+    CLT_PACKAGE=$(softwareupdate -l | grep -B 1 "Command Line Tools" | awk -F"*" '/^ *\*/ {print $2}' | sed 's/^ *Label: //' | sort -V | tail -n1)
     if [[ -z "$CLT_PACKAGE" ]]; then
       abort "No Command Line Tools package found for installation 🚫."
     fi
@@ -77,11 +90,46 @@ install_workbrew() {
   # Save the API key securely
   echo "$API_KEY" | sudo tee "/opt/workbrew/home/Library/Application Support/com.workbrew.workbrew-agent/api_key" >/dev/null
 
+  # Use the download URL directly
+  PACKAGE_URL="https://console.workbrew.com/downloads/macos"
+
   echo "⬇️  Downloading the Workbrew agent package..."
-  curl -O https://console.workbrew.com/downloads/macos/workbrew-agent.pkg || abort "Failed to download Workbrew agent package ❌."
+
+  # Create temporary directory for download
+  INSTALL_DIR=$(mktemp -d)
+  pushd "$INSTALL_DIR" >/dev/null
+
+  # Download the package, following redirects, saving with original filename
+  curl -L -O -J "$PACKAGE_URL" || abort "Failed to download Workbrew agent package ❌."
+
+  # Determine the downloaded package name
+  PACKAGE_NAME=$(ls Workbrew-*.pkg | head -n 1)
+
+  # If PACKAGE_NAME is empty, fall back to default
+  if [[ -z "$PACKAGE_NAME" ]]; then
+    PACKAGE_NAME="Workbrew.pkg"
+    mv "$(ls *.pkg | head -n1)" "$PACKAGE_NAME"
+  fi
+
+  # Verify that the downloaded file exists
+  if [[ ! -f "$PACKAGE_NAME" ]]; then
+    abort "Downloaded Workbrew package not found ❌."
+  fi
+
+  # Optional: Verify the integrity of the package (requires pkgutil)
+  if ! pkgutil --check-signature "$PACKAGE_NAME" &>/dev/null; then
+    abort "Downloaded package is invalid or corrupted ❌."
+  fi
+
   echo "📦 Installing the Workbrew agent package..."
-  sudo installer -pkg workbrew-agent.pkg -target / || abort "Installation of Workbrew package failed 🚫."
-  rm -f workbrew-agent.pkg
+
+  # Install the package
+  sudo installer -pkg "$PACKAGE_NAME" -target / || abort "Installation of Workbrew package failed 🚫."
+
+  # Clean up
+  popd >/dev/null
+  rm -rf "$INSTALL_DIR"
+
   ohai "✅ Workbrew installation is complete! 🎉"
 }
 
@@ -89,6 +137,14 @@ install_workbrew() {
 monitor_logs() {
   LOG_FILE="/opt/workbrew/var/log/workbrew-agent.log"
   echo "👀 Monitoring Workbrew logs for any issues..."
+
+  # Ensure the log file exists before tailing
+  if [[ ! -f "$LOG_FILE" ]]; then
+    warn "Log file $LOG_FILE does not exist yet. Waiting for it to be created..."
+    until [[ -f "$LOG_FILE" ]]; do
+      sleep 1
+    done
+  fi
 
   tail -Fn0 "$LOG_FILE" | while read -r line; do
     if [[ "$line" == *"ERROR"* ]]; then
@@ -98,9 +154,13 @@ monitor_logs() {
   done &
 }
 
+# Ensure cleanup on exit
 trap 'rm -f "/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress"' EXIT
 
-# Main script execution steps
+# Main script execution
+parse_args "$@"
+check_os
+ohai "Welcome to Workbrew! 🍻 Setting up your device for optimal performance."
 check_xcode_clt
 install_workbrew
 monitor_logs
