@@ -1,23 +1,24 @@
 #!/bin/bash
 
-set -u
+set -euo pipefail
 
-# Function to display a message and exit the script if necessary
+# Function to print an error message and exit the script.
 abort() {
   printf "🚨 %s\n" "$@" >&2
   exit 1
 }
 
-# Functions to display user-friendly messages
+# Function to print an informational message.
 ohai() {
   printf "🍻 \033[1;34m==>\033[1;39m %s\033[0m\n" "$1"
 }
 
+# Function to print a warning message.
 warn() {
   printf "⚠️ \033[1;31mWarning:\033[0m %s\n" "$1" >&2
 }
 
-# Usage guide if the script is incorrectly invoked
+# Function to display usage information.
 usage() {
   cat <<EOS
 💡 Workbrew Installer for macOS
@@ -28,38 +29,44 @@ EOS
   exit "${1:-0}"
 }
 
-# Verify that the user has provided an API key
+# Check if the correct number of arguments is provided and if the first argument is "--api-key".
 if [[ "$#" -ne 2 ]] || [[ "$1" != "--api-key" ]]; then
-  usage
+  usage 1
 fi
 
+# Assign the second argument to API_KEY.
 API_KEY="$2"
+# Check if the API_KEY is empty.
 if [[ -z "$API_KEY" ]]; then
   abort "API key is required to proceed 🚧. Please provide your unique API key."
 fi
 
-# Verify that the script is being run on macOS
+# Check if the operating system is macOS.
 OS="$(uname)"
 if [[ "$OS" != "Darwin" ]]; then
   abort "Workbrew is only supported on macOS 🖥️. Please use a macOS device to run this installer."
 fi
 
+# Print a welcome message.
 ohai "Welcome to Workbrew! 🍻 Setting up your device for optimal performance."
 
-# Check for Xcode Command Line Tools (CLT) on macOS
+# Function to check and install Xcode Command Line Tools.
 check_xcode_clt() {
   ohai "Checking for Xcode Command Line Tools... 🔍"
   if ! xcode-select -p &>/dev/null; then
     echo "🛠️ Xcode Command Line Tools not found. Installing..."
     touch "/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress"
     CLT_PACKAGE="$(softwareupdate -l | grep -B 1 "Command Line Tools" | awk -F"*" '/^ *\*/ {print $2}' | sed -e 's/^ *Label: //' -e 's/^ *//' | sort -V | tail -n1)"
-    sudo softwareupdate -i "$CLT_PACKAGE" --verbose
+    if [[ -z "$CLT_PACKAGE" ]]; then
+      abort "No Command Line Tools package found for installation 🚫."
+    fi
+    sudo softwareupdate -i "$CLT_PACKAGE" --verbose || abort "Failed to install Xcode Command Line Tools 🚫."
     rm -f "/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress"
   fi
   ohai "✅ Xcode Command Line Tools are installed!"
 }
 
-# Install Workbrew and configure the agent with the provided API key
+# Function to install Workbrew.
 install_workbrew() {
   ohai "Starting Workbrew installation... 🚀"
 
@@ -70,11 +77,11 @@ install_workbrew() {
   # Save the API key securely
   echo "$API_KEY" | sudo tee "/opt/workbrew/home/Library/Application Support/com.workbrew.workbrew-agent/api_key" >/dev/null
 
-  # Download and install the Workbrew agent
   echo "⬇️  Downloading the Workbrew agent package..."
   curl -O https://console.workbrew.com/downloads/macos/workbrew-agent.pkg || abort "Failed to download Workbrew agent package ❌."
   echo "📦 Installing the Workbrew agent package..."
   sudo installer -pkg workbrew-agent.pkg -target / || abort "Installation of Workbrew package failed 🚫."
+  rm -f workbrew-agent.pkg
   ohai "✅ Workbrew installation is complete! 🎉"
 }
 
@@ -83,14 +90,15 @@ monitor_logs() {
   LOG_FILE="/opt/workbrew/var/log/workbrew-agent.log"
   echo "👀 Monitoring Workbrew logs for any issues..."
 
-  # Start background monitoring
-  tail -Fn0 "$LOG_FILE" | while read line; do
+  tail -Fn0 "$LOG_FILE" | while read -r line; do
     if [[ "$line" == *"ERROR"* ]]; then
       echo "⚠️  Uh-oh! Error detected in Workbrew logs: $line"
       echo "💡 Need help? Check out https://workbrew.com for support."
     fi
   done &
 }
+
+trap 'rm -f "/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress"' EXIT
 
 # Main script execution steps
 check_xcode_clt
